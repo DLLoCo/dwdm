@@ -1,0 +1,44 @@
+# ============================================================
+# NYC Taxi Demand Prediction — Configuration
+# ============================================================
+
+data:
+  dataset: NYCTaxi
+  data_dir: data/processed/NYCTaxi        # folder with train/val/test.npz + adj_mx.npz
+  num_nodes: 200          # 10 x 20 grid
+  input_dim: 2            # pickup (inflow) + dropoff (outflow)
+  output_dim: 2
+  input_len: 35           # ST-SSL: recent 2h + previous 3-day context
+  output_len: 1            # predict next 1 time step
+  grid_rows: 10
+  grid_cols: 20
+  time_interval: 30       # minutes
+  train_ratio: 0.7        # only used in single-file mode
+  val_ratio: 0.1
+  test_ratio: 0.2
+
+model:
+  hidden_dim: 64
+  num_layers: 3           # CGC layers (M in paper)
+  cheb_k: 3               # diffusion steps (K in paper)
+  embed_dim: 50           # node embedding dim (L in paper)
+  use_flow_gate: false    # enable after Step 5
+  use_ext_features: false # enable after Step 6
+  ext_dim: 10
+  dropout: 0.1
+
+train:
+  epochs: 20
+  batch_size: 64
+  lr: 0.001
+  weight_decay: 0.0001
+  early_stop_patience: 8
+  cl_decay_steps: 2000
+  max_grad_norm: 5.0
+  seed: 42
+  save_dir: checkpoints/
+  log_every: 10
+
+loss:
+  type: mae
+  lambda_pickup: 0.5
