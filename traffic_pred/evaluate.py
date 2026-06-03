@@ -20,7 +20,7 @@ from model.net import TrafficPredNet
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--config', default='configs/nyctaxi_cluster.yaml')
+    p.add_argument('--config', default='configs/ablation/with_flowgate.yaml')
     p.add_argument('--checkpoint', default='checkpoints/best_model.pt')
     p.add_argument('--gpu', type=int, default=0)
     return p.parse_args()
@@ -82,7 +82,9 @@ def main():
 
     use_fg = mcfg.get('use_flow_gate', False)
     use_te = mcfg.get('use_time_embed', False)
-    use_cl = mcfg.get('use_cluster', False)
+    use_cl = (mcfg.get('use_cluster', False)
+          or mcfg.get('use_spatial_cluster', False)
+          or mcfg.get('use_temporal_cluster', False))
     use_time = use_te or use_fg
 
     print("=" * 68)

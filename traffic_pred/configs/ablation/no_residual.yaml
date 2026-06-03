@@ -1,0 +1,46 @@
+# Ablation: remove residual prediction
+data:
+  dataset: NYCTaxi
+  data_dir: data/processed/NYCTaxi
+  num_nodes: 200
+  input_dim: 2
+  output_dim: 2
+  input_len: 35
+  output_len: 1
+  grid_rows: 10
+  grid_cols: 20
+  time_interval: 30
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+
+train:
+  epochs: 100
+  batch_size: 64
+  lr: 0.001
+  weight_decay: 0.0001
+  early_stop_patience: 15
+  cl_decay_steps: 2000
+  max_grad_norm: 5.0
+  seed: 42
+  save_dir: checkpoints/ablation_no_residual/
+  log_every: 10
+
+loss:
+  type: mae
+  lambda_pickup: 0.5
+
+model:
+  hidden_dim: 64
+  num_layers: 3
+  cheb_k: 3
+  embed_dim: 50
+  kernel_size: 3
+  use_flow_gate: false
+  use_time_embed: false
+  use_spatial_cluster: true
+  use_temporal_cluster: true
+  n_spatial_clusters: 5
+  n_temporal_clusters: 5
+  use_residual: false
+  dropout: 0.1

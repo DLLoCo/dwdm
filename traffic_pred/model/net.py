@@ -1,33 +1,18 @@
 """
-TrafficPredNet v6 — TC + CGC + Dual Cluster Embedding
-======================================================
-All three challenges addressed:
-  Challenge 1 (ST coupling):       TC + CGC in each ST block
-  Challenge 2 (hotspot migration): CGC coupled adjacency + Spatial Cluster Embedding
-  Challenge 3 (external events):   Temporal Cluster Embedding (data-driven time awareness)
-
-v4/v5 → v6 change:
-  Replace unreliable TimeEmbedding (offset guessing) with data-driven clustering.
-  Spatial cluster tells model "what type of region this is" (hot/cold/transit).
-  Temporal cluster tells model "what demand regime we're in" (night/peak/plateau).
-  Both are learned from data via K-Means, no absolute time needed.
-
-Backward compatible: use_cluster=False → identical to v2 (TC+CGC only).
+TrafficPredNet v6 — TC + CGC + Dual Cluster + Residual Prediction
+==================================================================
+Ablation flags:
+  use_spatial_cluster:  Spatial Cluster Embedding (Challenge 2)
+  use_temporal_cluster: Temporal Cluster Embedding (Challenge 3)
+  use_residual:         Residual prediction (pred = last_obs + correction)
 """
-import math
 import torch
 import torch.nn as nn
 from model.cgc import AdjacencyLearner
 from model.st_block import STBlock
 
 
-# ============================================================
-# Time Embedding (v4 — kept for backward compat, use_time_embed)
-# ============================================================
-
 class TimeEmbedding(nn.Module):
-    """Encode hour-of-day (0-47) and day-of-week (0-6) as embeddings."""
-
     def __init__(self, embed_dim):
         super().__init__()
         self.hour_embed = nn.Embedding(48, embed_dim)
@@ -37,57 +22,48 @@ class TimeEmbedding(nn.Module):
         return self.hour_embed(hour_idx) + self.dow_embed(dow_idx)
 
 
-# ============================================================
-# Cluster Embedding (v6 — new)
-# ============================================================
-
 class ClusterEmbedding(nn.Module):
-    """
-    Dual cluster conditioning for spatio-temporal heterogeneity.
+    """Dual cluster conditioning — supports either or both clusters."""
 
-    Spatial cluster:  per-node, static → (N, D), broadcast to all B and T
-    Temporal cluster: per-sample → (B, D), broadcast to all T and N
-
-    Combined effect: model knows "this is a hot-zone node during late-night"
-    vs "this is a cold-zone node during morning peak" — different treatment.
-    """
-
-    def __init__(self, n_spatial: int, n_temporal: int, embed_dim: int):
+    def __init__(self, n_spatial, n_temporal, embed_dim,
+                 use_spatial=True, use_temporal=True):
         super().__init__()
-        self.spatial_embed = nn.Embedding(n_spatial, embed_dim)
-        self.temporal_embed = nn.Embedding(n_temporal, embed_dim)
-        # Learnable gate to control how much cluster info to inject
-        self.gate = nn.Sequential(
-            nn.Linear(embed_dim * 2, embed_dim),
-            nn.Sigmoid()
-        )
+        self.use_spatial = use_spatial
+        self.use_temporal = use_temporal
+
+        if use_spatial:
+            self.spatial_embed = nn.Embedding(n_spatial, embed_dim)
+        if use_temporal:
+            self.temporal_embed = nn.Embedding(n_temporal, embed_dim)
+
+        # Gated fusion only when both active
+        if use_spatial and use_temporal:
+            self.gate = nn.Sequential(
+                nn.Linear(embed_dim * 2, embed_dim),
+                nn.Sigmoid()
+            )
 
     def forward(self, spatial_ids, temporal_ids):
-        """
-        spatial_ids:  (N,) long tensor — node cluster assignment
-        temporal_ids: (B,) long tensor — sample temporal cluster
-        Returns: (B, 1, N, D) — additive embedding for input tensor
-        """
-        s_emb = self.spatial_embed(spatial_ids)       # (N, D)
-        t_emb = self.temporal_embed(temporal_ids)     # (B, D)
+        """Returns (B, 1, N, D) additive embedding."""
+        if self.use_spatial and self.use_temporal:
+            s = self.spatial_embed(spatial_ids)        # (N, D)
+            t = self.temporal_embed(temporal_ids)      # (B, D)
+            B, N = t.shape[0], s.shape[0]
+            s_exp = s.unsqueeze(0).expand(B, N, -1)
+            t_exp = t.unsqueeze(1).expand(B, N, -1)
+            gate = self.gate(torch.cat([s_exp, t_exp], dim=-1))
+            out = gate * s_exp + (1 - gate) * t_exp
+        elif self.use_spatial:
+            s = self.spatial_embed(spatial_ids)        # (N, D)
+            out = s.unsqueeze(0)                       # (1, N, D) → broadcasts
+        elif self.use_temporal:
+            t = self.temporal_embed(temporal_ids)      # (B, D)
+            out = t.unsqueeze(1)                       # (B, 1, D) → broadcasts
+        else:
+            return None
 
-        # Combine: broadcast s_emb to (B, N, D) and t_emb to (B, N, D)
-        B = t_emb.shape[0]
-        N = s_emb.shape[0]
-        s_expanded = s_emb.unsqueeze(0).expand(B, N, -1)   # (B, N, D)
-        t_expanded = t_emb.unsqueeze(1).expand(B, N, -1)   # (B, N, D)
+        return out.unsqueeze(1)  # (B, 1, N, D) or broadcastable
 
-        # Gated fusion
-        combined = torch.cat([s_expanded, t_expanded], dim=-1)  # (B, N, 2D)
-        gate = self.gate(combined)                               # (B, N, D)
-        out = gate * s_expanded + (1 - gate) * t_expanded       # (B, N, D)
-
-        return out.unsqueeze(1)  # (B, 1, N, D) for broadcasting over T
-
-
-# ============================================================
-# Main Model
-# ============================================================
 
 class TrafficPredNet(nn.Module):
 
@@ -95,26 +71,38 @@ class TrafficPredNet(nn.Module):
                  num_layers=3, cheb_k=3, embed_dim=50, kernel_size=3,
                  dropout=0.1, use_flow_gate=False, use_time_embed=False,
                  num_patterns=48,
-                 use_cluster=False, n_spatial_clusters=5,
-                 n_temporal_clusters=5):
+                 use_spatial_cluster=False, use_temporal_cluster=False,
+                 n_spatial_clusters=5, n_temporal_clusters=5,
+                 use_residual=True,
+                 # backward compat: old configs use 'use_cluster'
+                 use_cluster=False):
         super().__init__()
         self.num_nodes = num_nodes
         self.num_layers = num_layers
         self.output_dim = output_dim
         self.use_flow_gate = use_flow_gate
         self.use_time_embed = use_time_embed
-        self.use_cluster = use_cluster
+        self.use_residual = use_residual
+
+        # Handle old 'use_cluster' flag → both spatial+temporal
+        if use_cluster and not use_spatial_cluster and not use_temporal_cluster:
+            use_spatial_cluster = True
+            use_temporal_cluster = True
+
+        self.use_spatial_cluster = use_spatial_cluster
+        self.use_temporal_cluster = use_temporal_cluster
+        self.use_any_cluster = use_spatial_cluster or use_temporal_cluster
 
         self.input_proj = nn.Linear(input_dim, hidden_dim)
 
-        # v4: Time Embedding (optional, kept for backward compat)
         if use_time_embed:
             self.time_embed = TimeEmbedding(hidden_dim)
 
-        # v6: Cluster Embedding (optional)
-        if use_cluster:
+        if self.use_any_cluster:
             self.cluster_embed = ClusterEmbedding(
-                n_spatial_clusters, n_temporal_clusters, hidden_dim)
+                n_spatial_clusters, n_temporal_clusters, hidden_dim,
+                use_spatial=use_spatial_cluster,
+                use_temporal=use_temporal_cluster)
 
         self.adj_learner = AdjacencyLearner(num_nodes, embed_dim, num_layers)
 
@@ -133,36 +121,34 @@ class TrafficPredNet(nn.Module):
     def forward(self, x, base_adj=None, od_patterns=None,
                 hour_idx=None, dow_idx=None,
                 spatial_cluster=None, temporal_cluster=None):
-        """
-        x:                (B, T, N, C)
-        base_adj:         (N, N)
-        od_patterns:      (P, N, N) for Flow Gate
-        hour_idx:         (B,) 0-47  (for TimeEmbed v4)
-        dow_idx:          (B,) 0-6   (for TimeEmbed v4)
-        spatial_cluster:  (N,) long  (for ClusterEmbed v6)
-        temporal_cluster: (B,) long  (for ClusterEmbed v6)
-        """
         h = self.input_proj(x)  # (B, T, N, D)
 
-        # v4: Time Embedding
         if self.use_time_embed and hour_idx is not None and dow_idx is not None:
-            t_emb = self.time_embed(hour_idx, dow_idx)  # (B, D)
+            t_emb = self.time_embed(hour_idx, dow_idx)
             h = h + t_emb[:, None, None, :]
 
-        # v6: Cluster Embedding
-        if (self.use_cluster and spatial_cluster is not None
-                and temporal_cluster is not None):
-            c_emb = self.cluster_embed(spatial_cluster, temporal_cluster)
-            h = h + c_emb  # (B, 1, N, D) broadcasts to (B, T, N, D)
+        if self.use_any_cluster:
+            c_emb = self.cluster_embed(
+                spatial_cluster if self.use_spatial_cluster else None,
+                temporal_cluster if self.use_temporal_cluster else None)
+            if c_emb is not None:
+                h = h + c_emb
 
         adjs = self.adj_learner.get_all_adj(base_adj)
 
         for i, block in enumerate(self.st_blocks):
             h = block(h, adjs[i], od_patterns=od_patterns)
 
-        h = h[:, -1, :, :]      # (B, N, D)
-        pred = self.output_proj(h)  # (B, N, output_dim)
-        return pred.unsqueeze(1)    # (B, 1, N, output_dim)
+        h = h[:, -1, :, :]                     # (B, N, D) last step
+        correction = self.output_proj(h)        # (B, N, C)
+
+        if self.use_residual:
+            last_obs = x[:, -1, :, :]           # (B, N, C)
+            pred = last_obs + correction
+        else:
+            pred = correction
+
+        return pred.unsqueeze(1)
 
     @classmethod
     def from_config(cls, config):
@@ -181,6 +167,9 @@ class TrafficPredNet(nn.Module):
             use_flow_gate=mcfg.get('use_flow_gate', False),
             use_time_embed=mcfg.get('use_time_embed', False),
             use_cluster=mcfg.get('use_cluster', False),
+            use_spatial_cluster=mcfg.get('use_spatial_cluster', False),
+            use_temporal_cluster=mcfg.get('use_temporal_cluster', False),
             n_spatial_clusters=mcfg.get('n_spatial_clusters', 5),
             n_temporal_clusters=mcfg.get('n_temporal_clusters', 5),
+            use_residual=mcfg.get('use_residual', True),
         )

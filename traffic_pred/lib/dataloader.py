@@ -126,7 +126,9 @@ def build_dataloaders(config):
     mcfg = config['model']
     batch_size = tcfg['batch_size']
 
-    use_cluster = mcfg.get('use_cluster', False)
+    use_cluster = (mcfg.get('use_cluster', False)
+                   or mcfg.get('use_spatial_cluster', False)
+                   or mcfg.get('use_temporal_cluster', False))
 
     # ---- Try Layout A: ST-SSL split files ----
     data_dir = dcfg.get('data_dir', '')
