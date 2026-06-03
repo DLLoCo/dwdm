@@ -1,5 +1,5 @@
 """
-Baseline comparison with STGCN and CCRNN.
+Baseline comparison — all 8 models, compatible with 4-tuple dataloaders.
 
 Baselines:
   1. HA           - Historical Average
@@ -12,9 +12,9 @@ Baselines:
   8. CCRNN        - CGC (learned adj) + GRU
 
 Usage:
-    python baselines.py
-    python baselines.py --epochs 30
-    python baselines.py --only STGCN CCRNN
+    python baselines.py --config configs/nyctaxi_cont.yaml
+    python baselines.py --config configs/nyctaxi_cont.yaml --epochs 30
+    python baselines.py --config configs/nyctaxi_cont.yaml --only STGCN CCRNN
 """
 import sys, os, time, argparse
 sys.path.insert(0, os.path.dirname(__file__))
@@ -25,6 +25,15 @@ import numpy as np
 from lib.utils import load_config, set_seed, get_device, get_project_path
 from lib.dataloader import build_dataloaders
 from lib.metrics import compute_all_metrics, MaskedMAELoss
+
+
+# ============================================================
+# Batch unpacking helper (handles both 2-tuple and 4-tuple)
+# ============================================================
+
+def unpack_batch(batch):
+    """Unpack (x, y) or (x, y, hour, dow) batch."""
+    return batch[0], batch[1]
 
 
 # ============================================================
@@ -98,7 +107,6 @@ class TransformerBaseline(nn.Module):
 # ============================================================
 
 class ChebConv(nn.Module):
-    """Chebyshev graph convolution with FIXED adjacency (no learning)."""
     def __init__(self, in_dim, out_dim, K=3):
         super().__init__()
         self.K = K
@@ -113,7 +121,6 @@ class ChebConv(nn.Module):
             nn.init.xavier_uniform_(w)
 
     def forward(self, x, adj):
-        """x: (B, N, D), adj: (N, N) fixed. Returns (B, N, D_out)."""
         out = x @ self.weights[0]
         if self.K > 1:
             T0 = x
@@ -127,7 +134,6 @@ class ChebConv(nn.Module):
 
 
 class STGCNBlock(nn.Module):
-    """One STGCN block: gated temporal conv -> ChebNet -> residual."""
     def __init__(self, dim, num_nodes, K=3, kernel_size=3):
         super().__init__()
         self.tconv = nn.Conv1d(dim, dim * 2, kernel_size,
@@ -136,16 +142,13 @@ class STGCNBlock(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x, adj):
-        """x: (B, T, N, D), adj: (N, N)."""
         residual = x
         B, T, N, D = x.shape
-        # Temporal: gated conv
         h = x.permute(0, 2, 3, 1).reshape(B * N, D, T)
         h = self.tconv(h)
         h_val, h_gate = h.chunk(2, dim=1)
         h = h_val * torch.sigmoid(h_gate)
-        h = h.reshape(B, N, D, T).permute(0, 3, 1, 2)  # (B,T,N,D)
-        # Spatial: ChebNet at each time step
+        h = h.reshape(B, N, D, T).permute(0, 3, 1, 2)
         h = h.reshape(B * T, N, D)
         h = self.gconv(h, adj)
         h = h.reshape(B, T, N, D)
@@ -153,10 +156,6 @@ class STGCNBlock(nn.Module):
 
 
 class STGCNBaseline(nn.Module):
-    """
-    STGCN (Yu et al., IJCAI 2018).
-    Key difference from ours: uses FIXED ChebNet, no learned adjacency.
-    """
     def __init__(self, num_nodes, input_dim, output_dim, hidden_dim=64,
                  num_layers=3, K=3):
         super().__init__()
@@ -183,12 +182,10 @@ class STGCNBaseline(nn.Module):
 # ============================================================
 
 class GraphConvGRUCell(nn.Module):
-    """GRU cell with graph convolution gates (CCRNN style)."""
     def __init__(self, in_dim, hidden_dim, cheb_k=3):
         super().__init__()
         self.hidden_dim = hidden_dim
         gate_in = in_dim + hidden_dim
-        # Simple diffusion conv for each gate
         self.Wz = nn.ParameterList([nn.Parameter(torch.randn(gate_in, hidden_dim) * 0.05) for _ in range(cheb_k)])
         self.Wr = nn.ParameterList([nn.Parameter(torch.randn(gate_in, hidden_dim) * 0.05) for _ in range(cheb_k)])
         self.Wh = nn.ParameterList([nn.Parameter(torch.randn(gate_in, hidden_dim) * 0.05) for _ in range(cheb_k)])
@@ -211,28 +208,18 @@ class GraphConvGRUCell(nn.Module):
 
 
 class CCRNNBaseline(nn.Module):
-    """
-    CCRNN (Ye et al., AAAI 2021).
-    Key difference from ours: uses GRU (sequential), not temporal conv.
-    Processes 35 steps one by one — slow and assumes sequential order.
-    """
     def __init__(self, num_nodes, input_dim, output_dim, hidden_dim=64,
                  num_layers=2, cheb_k=3, embed_dim=30):
         super().__init__()
         self.num_nodes = num_nodes
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
-
-        # Learned adjacency (CGC style)
         self.E1 = nn.Parameter(torch.randn(num_nodes, embed_dim) * 0.1)
         self.E2 = nn.Parameter(torch.randn(num_nodes, embed_dim) * 0.1)
-
-        # Stacked GRU layers
         self.cells = nn.ModuleList()
         for m in range(num_layers):
             dim_in = input_dim if m == 0 else hidden_dim
             self.cells.append(GraphConvGRUCell(dim_in, hidden_dim, cheb_k))
-
         self.output_proj = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, output_dim),
@@ -241,28 +228,21 @@ class CCRNNBaseline(nn.Module):
     def forward(self, x, base_adj=None):
         B, T, N, C = x.shape
         device = x.device
-
-        # Learned adjacency
         adj = torch.softmax(torch.relu(self.E1 @ self.E2.t()), dim=-1)
         if base_adj is not None:
             adj = 0.5 * base_adj + 0.5 * adj
-
-        # Init hidden states
         h = [torch.zeros(B, N, self.hidden_dim, device=device)
              for _ in range(self.num_layers)]
-
-        # Process each time step
         for t in range(T):
             inp = x[:, t, :, :]
             for m in range(self.num_layers):
                 h[m] = self.cells[m](inp, h[m], adj)
                 inp = h[m]
-
         return self.output_proj(h[-1]).unsqueeze(1)
 
 
 # ============================================================
-# Training + Eval helpers
+# Training + Eval (4-tuple safe)
 # ============================================================
 
 def train_model(model, train_loader, val_loader, device, base_adj,
@@ -277,8 +257,8 @@ def train_model(model, train_loader, val_loader, device, base_adj,
     for epoch in range(1, epochs + 1):
         model.train()
         losses = []
-        for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
+        for batch in train_loader:
+            x, y = batch[0].to(device), batch[1].to(device)
             optimizer.zero_grad()
             loss = criterion(model(x, base_adj), y)
             loss.backward()
@@ -289,8 +269,8 @@ def train_model(model, train_loader, val_loader, device, base_adj,
         model.eval()
         val_losses = []
         with torch.no_grad():
-            for x, y in val_loader:
-                x, y = x.to(device), y.to(device)
+            for batch in val_loader:
+                x, y = batch[0].to(device), batch[1].to(device)
                 val_losses.append(criterion(model(x, base_adj), y).item())
 
         tl, vl = np.mean(losses), np.mean(val_losses)
@@ -317,27 +297,30 @@ def eval_model(model, loader, scaler, device, base_adj):
     model.eval()
     preds, trues = [], []
     with torch.no_grad():
-        for x, y in loader:
-            pred = model(x.to(device), base_adj)
+        for batch in loader:
+            x, y = batch[0].to(device), batch[1]
+            pred = model(x, base_adj)
             preds.append(scaler.inverse_transform(pred.cpu()).numpy())
             trues.append(scaler.inverse_transform(y).numpy())
     return compute_all_metrics(np.concatenate(preds), np.concatenate(trues))
 
 
 def baseline_ha(train_loader, test_loader, scaler):
-    all_y = [y.numpy() for _, y in train_loader]
+    all_y = [batch[1].numpy() for batch in train_loader]
     mean_pred = np.concatenate(all_y).mean(axis=0, keepdims=True)
     preds, trues = [], []
-    for _, y in test_loader:
+    for batch in test_loader:
+        y = batch[1]
         preds.append(scaler.inverse_transform(
-            torch.FloatTensor(np.tile(mean_pred, (y.shape[0],1,1,1)))).numpy())
+            torch.FloatTensor(np.tile(mean_pred, (y.shape[0], 1, 1, 1)))).numpy())
         trues.append(scaler.inverse_transform(y).numpy())
     return compute_all_metrics(np.concatenate(preds), np.concatenate(trues))
 
 
 def baseline_last_value(test_loader, scaler):
     preds, trues = [], []
-    for x, y in test_loader:
+    for batch in test_loader:
+        x, y = batch[0], batch[1]
         preds.append(scaler.inverse_transform(x[:, -1:]).numpy())
         trues.append(scaler.inverse_transform(y).numpy())
     return compute_all_metrics(np.concatenate(preds), np.concatenate(trues))
@@ -352,7 +335,8 @@ def parse_args():
     p.add_argument('--config', default='configs/nyctaxi.yaml')
     p.add_argument('--epochs', type=int, default=30)
     p.add_argument('--gpu', type=int, default=0)
-    p.add_argument('--only', nargs='*', default=None)
+    p.add_argument('--only', nargs='*', default=None,
+                   help='Run specific baselines, e.g. --only STGCN CCRNN MLP')
     return p.parse_args()
 
 
@@ -363,13 +347,14 @@ def main():
     device = get_device(args.gpu)
 
     print("=" * 70)
-    print("Baseline Comparison (with STGCN & CCRNN)")
+    print("Baseline Comparison (Continuous Data)")
     print("=" * 70)
     print(f"Device: {device}, Epochs: {args.epochs}")
+    print(f"Config: {args.config}")
 
     train_loader, val_loader, test_loader, scaler, adj = build_dataloaders(config)
 
-    # Prepare adjacency
+    # Adjacency
     if adj is not None:
         base_adj = torch.FloatTensor(adj).to(device)
     else:
@@ -378,7 +363,9 @@ def main():
             build_grid_adj(config['data']['grid_rows'], config['data']['grid_cols'])))
         base_adj = torch.FloatTensor(adj_np).to(device)
 
-    x_sample, y_sample = next(iter(train_loader))
+    # Get dims from a batch
+    batch = next(iter(train_loader))
+    x_sample, y_sample = batch[0], batch[1]
     B, T, N, C = x_sample.shape
     out_dim = y_sample.shape[-1]
     print(f"Input: ({B}, {T}, {N}, {C}), Output dim: {out_dim}\n")
@@ -422,19 +409,44 @@ def main():
         results[name] = eval_model(model, test_loader, scaler, device, base_adj)
         print(f"    MAE={results[name]['MAE']:.4f}  Time: {time.time()-t0:.0f}s\n")
 
-    # --- Our model ---
+    # --- Our model (from checkpoint, if exists) ---
     ckpt = get_project_path('checkpoints', 'best_model.pt')
     if os.path.exists(ckpt) and (run_all or 'Ours' in (args.only or [])):
         from model.net import TrafficPredNet
         print("[Ours] Loading from checkpoint...")
-        model = TrafficPredNet.from_config(config).to(device)
-        model.load_state_dict(torch.load(ckpt, map_location=device,
-                                         weights_only=True))
-        results['Ours (TC+CGC)'] = eval_model(
-            model, test_loader, scaler, device, base_adj)
-        print(f"    MAE={results['Ours (TC+CGC)']['MAE']:.4f}\n")
+        try:
+            model = TrafficPredNet.from_config(config).to(device)
+            model.load_state_dict(torch.load(ckpt, map_location=device,
+                                             weights_only=True))
+            od_patterns = None
+            od_path = config['data'].get('od_path', '')
+            if od_path:
+                if not os.path.isabs(od_path):
+                    od_path = get_project_path(od_path)
+                if os.path.exists(od_path):
+                    od_npz = np.load(od_path)
+                    od_key = 'od' if 'od' in od_npz else list(od_npz.keys())[0]
+                    od_patterns = torch.FloatTensor(od_npz[od_key]).to(device)
 
-    # --- Table ---
+            model.eval()
+            preds, trues = [], []
+            with torch.no_grad():
+                for batch in test_loader:
+                    x = batch[0].to(device)
+                    y = batch[1]
+                    hour = batch[2].to(device) if len(batch) > 2 else None
+                    dow = batch[3].to(device) if len(batch) > 3 else None
+                    pred = model(x, base_adj, od_patterns=od_patterns,
+                                 hour_idx=hour, dow_idx=dow)
+                    preds.append(scaler.inverse_transform(pred.cpu()).numpy())
+                    trues.append(scaler.inverse_transform(y).numpy())
+            results['Ours (TC+CGC)'] = compute_all_metrics(
+                np.concatenate(preds), np.concatenate(trues))
+            print(f"    MAE={results['Ours (TC+CGC)']['MAE']:.4f}\n")
+        except Exception as e:
+            print(f"    [SKIP] Checkpoint incompatible: {e}\n")
+
+    # --- Results table ---
     print("=" * 70)
     print(f"{'Model':<20s} {'MAE':>10s} {'RMSE':>10s} {'MAPE(%)':>10s}")
     print("-" * 70)

@@ -23,8 +23,8 @@ model:
   cheb_k: 3               # diffusion steps
   embed_dim: 50           # node embedding dim
   kernel_size: 3          # temporal conv kernel
-  use_flow_gate: true     # OD pattern attention gating
-  use_time_embed: true    # hour + weekday embedding
+  use_flow_gate: false     # OD pattern attention gating
+  use_time_embed: false    # hour + weekday embedding
   dropout: 0.1
 
 train:

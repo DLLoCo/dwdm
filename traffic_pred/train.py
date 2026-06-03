@@ -17,7 +17,7 @@ from model.net import TrafficPredNet
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--config', default='configs/nyctaxi.yaml')
+    p.add_argument('--config', default='configs/nyctaxi_v5.yaml')
     p.add_argument('--epochs', type=int, default=None)
     p.add_argument('--lr', type=float, default=None)
     p.add_argument('--batch_size', type=int, default=None)

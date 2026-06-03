@@ -1,0 +1,49 @@
+# ============================================================
+# NYC Taxi Demand Prediction — Continuous Data Pipeline
+# ============================================================
+# 使用 preprocess_raw.py 生成的连续时间序列代替 ST-SSL 的非连续拼接格式
+# demand.npz: (1488, 200, 2) — 31天, 30min间隔, 10x20网格
+
+data:
+  dataset: NYCTaxi
+  data_mode: continuous                            # 关键: 使用连续滑窗而非 ST-SSL 格式
+  demand_path: data/processed/NYCTaxi_OD/demand.npz
+  od_path: data/processed/NYCTaxi_OD/od_hourly.npz
+  num_nodes: 200
+  input_dim: 2            # pickup + dropoff
+  output_dim: 2
+  input_len: 12           # 连续 12 步 = 6 小时
+  output_len: 1           # 预测下一个 30min
+  grid_rows: 10
+  grid_cols: 20
+  time_interval: 30       # minutes
+  start_weekday: 3        # 2015-01-01 = Thursday (Mon=0)
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+
+model:
+  hidden_dim: 64
+  num_layers: 3
+  cheb_k: 3
+  embed_dim: 50
+  kernel_size: 3
+  use_flow_gate: true    # 先关掉, baseline 对比时不用
+  use_time_embed: true   # 先关掉, baseline 对比时不用
+  dropout: 0.1
+
+train:
+  epochs: 30
+  batch_size: 64
+  lr: 0.001
+  weight_decay: 0.0001
+  early_stop_patience: 15
+  cl_decay_steps: 2000
+  max_grad_norm: 5.0
+  seed: 42
+  save_dir: checkpoints/
+  log_every: 10
+
+loss:
+  type: mae
+  lambda_pickup: 0.5

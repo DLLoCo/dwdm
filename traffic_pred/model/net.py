@@ -1,14 +1,12 @@
 """
-TrafficPredNet v4 — TC + CGC + Flow Gate + Time Embedding
-==========================================================
-All three challenges addressed:
-  Challenge 1 (ST coupling):     TC + CGC in each ST block
-  Challenge 2 (hotspot migration): CGC coupled adjacency + multi-level agg
-  Challenge 3 (external events):  Time Embedding + Flow Gate (OD attention)
-
-Key insight: Time Embedding tells Flow Gate "what time it is",
-so attention can correctly select morning/evening/night OD patterns.
+TrafficPredNet v5 — TC + CGC + Flow Gate + Sin/Cos Time Embedding
+=================================================================
+v4 → v5 change: TimeEmbedding from learned nn.Embedding to sin/cos
+  - Captures cyclical nature: slot 47 (23:30) ≈ slot 0 (00:00)
+  - Multi-frequency: low freq = morning/evening, high freq = 8:00/8:30
+  - Zero parameters in encoding itself (only a linear projection)
 """
+import math
 import torch
 import torch.nn as nn
 from model.cgc import AdjacencyLearner
@@ -16,16 +14,25 @@ from model.st_block import STBlock
 
 
 class TimeEmbedding(nn.Module):
-    """Encode hour-of-day (0-47) and day-of-week (0-6) as embeddings."""
+    """Sin/cos multi-frequency encoding for hour-of-day and day-of-week."""
 
-    def __init__(self, embed_dim):
+    def __init__(self, embed_dim, num_freqs=4):
         super().__init__()
-        self.hour_embed = nn.Embedding(48, embed_dim)
-        self.dow_embed = nn.Embedding(7, embed_dim)
+        self.num_freqs = num_freqs
+        # hour: num_freqs×2 dims, dow: num_freqs×2 dims → project to embed_dim
+        raw_dim = num_freqs * 2 * 2
+        self.proj = nn.Linear(raw_dim, embed_dim)
 
     def forward(self, hour_idx, dow_idx):
-        """hour_idx: (B,), dow_idx: (B,) → (B, D)"""
-        return self.hour_embed(hour_idx) + self.dow_embed(dow_idx)
+        """hour_idx: (B,) 0-47, dow_idx: (B,) 0-6 → (B, embed_dim)"""
+        feats = []
+        for f in range(1, self.num_freqs + 1):
+            feats.append(torch.sin(2 * math.pi * hour_idx / 48.0 * f))
+            feats.append(torch.cos(2 * math.pi * hour_idx / 48.0 * f))
+            feats.append(torch.sin(2 * math.pi * dow_idx / 7.0 * f))
+            feats.append(torch.cos(2 * math.pi * dow_idx / 7.0 * f))
+        raw = torch.stack(feats, dim=-1).float()  # (B, num_freqs*4)
+        return self.proj(raw)                      # (B, embed_dim)
 
 
 class TrafficPredNet(nn.Module):
@@ -62,19 +69,11 @@ class TrafficPredNet(nn.Module):
 
     def forward(self, x, base_adj=None, od_patterns=None,
                 hour_idx=None, dow_idx=None):
-        """
-        x:           (B, T, N, C)
-        base_adj:    (N, N)
-        od_patterns: (P, N, N) for Flow Gate
-        hour_idx:    (B,) 0-47
-        dow_idx:     (B,) 0-6
-        """
-        h = self.input_proj(x)  # (B, T, N, D)
+        h = self.input_proj(x)
 
-        # Add time embedding: broadcast to all T steps and N nodes
         if self.use_time_embed and hour_idx is not None and dow_idx is not None:
-            t_emb = self.time_embed(hour_idx, dow_idx)  # (B, D)
-            h = h + t_emb[:, None, None, :]  # (B, T, N, D)
+            t_emb = self.time_embed(hour_idx, dow_idx)
+            h = h + t_emb[:, None, None, :]
 
         adjs = self.adj_learner.get_all_adj(base_adj)
 
