@@ -19,8 +19,8 @@ model:
   cheb_k: 3
   embed_dim: 50
   kernel_size: 3
-  use_flow_gate: false        # ← 开启
-  use_time_embed: false      # ← 开启
+  use_flow_gate: true        # ← 开启
+  use_time_embed: true      # ← 开启
   dropout: 0.1
 
 train:

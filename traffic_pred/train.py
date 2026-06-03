@@ -1,7 +1,11 @@
 """
 Training script for traffic demand prediction.
-Usage: python train.py
-       python train.py --epochs 50 --lr 0.003
+
+Usage:
+    python train.py                                    # default config
+    python train.py --config configs/nyctaxi.yaml      # old pipeline (no cluster)
+    python train.py --config configs/nyctaxi_cluster.yaml  # v6 with clustering
+    python train.py --epochs 50 --lr 0.003
 """
 import sys, os, time, argparse, json
 sys.path.insert(0, os.path.dirname(__file__))
@@ -17,7 +21,7 @@ from model.net import TrafficPredNet
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--config', default='configs/nyctaxi_v5.yaml')
+    p.add_argument('--config', default='configs/nyctaxi_cluster.yaml')
     p.add_argument('--epochs', type=int, default=None)
     p.add_argument('--lr', type=float, default=None)
     p.add_argument('--batch_size', type=int, default=None)
@@ -26,68 +30,71 @@ def parse_args():
 
 
 def load_od_patterns(config, device):
-    if not config['model'].get('use_flow_gate', False):
+    """Load OD flow patterns for Flow Gate if available."""
+    mcfg = config['model']
+    if not mcfg.get('use_flow_gate', False):
         return None
-    od_path = get_project_path('data', 'processed', 'NYCTaxi_OD', 'od_hourly.npz')
-    if not os.path.exists(od_path):
-        od_path = get_project_path('data', 'processed', 'NYCTaxi_OD', 'od_avg.npz')
+    od_dir = config['data'].get('data_dir', '').replace('NYCTaxi', 'NYCTaxi_OD')
+    if not os.path.isabs(od_dir):
+        od_dir = get_project_path(od_dir)
+    od_path = os.path.join(od_dir, 'od_hourly.npz')
     if os.path.exists(od_path):
-        from model.flow_gate import FlowGateManager
-        mgr = FlowGateManager(od_path, device)
-        if mgr.available:
-            return mgr.get_patterns()
-    print("[WARNING] OD data not found, flow gate disabled")
+        npz = np.load(od_path, allow_pickle=True)
+        # Try common key names
+        for key in ['od_hourly', 'od', 'arr_0', 'data']:
+            if key in npz:
+                od = npz[key].astype(np.float32)
+                t = torch.FloatTensor(od).to(device)
+                print(f"[FlowGate] Loaded {t.shape[0]} OD patterns: {t.shape}")
+                return t
+        # Fallback: use first key
+        first_key = list(npz.keys())[0]
+        od = npz[first_key].astype(np.float32)
+        t = torch.FloatTensor(od).to(device)
+        print(f"[FlowGate] Loaded {t.shape[0]} OD patterns (key='{first_key}'): {t.shape}")
+        return t
+    print("[FlowGate] WARNING: od_hourly.npz not found, Flow Gate disabled")
     return None
 
 
 def evaluate(model, loader, criterion, scaler, device, base_adj,
-             od_patterns=None, use_time=False):
+             od_flow=None, use_time=False, use_cluster=False,
+             spatial_cluster=None):
+    """Run evaluation on a data loader, return loss and metrics."""
     model.eval()
     losses, preds, trues = [], [], []
     with torch.no_grad():
         for batch in loader:
-            x, y = batch[0].to(device), batch[1].to(device)
+            x = batch[0].to(device)
+            y = batch[1].to(device)
             hour = batch[2].to(device) if use_time and len(batch) > 2 else None
             dow = batch[3].to(device) if use_time and len(batch) > 3 else None
+            tc = batch[4].to(device) if use_cluster and len(batch) > 4 else None
 
-            pred = model(x, base_adj, od_patterns=od_patterns,
-                         hour_idx=hour, dow_idx=dow)
-            losses.append(criterion(pred, y).item())
-            preds.append(scaler.inverse_transform(pred.cpu()).numpy())
-            trues.append(scaler.inverse_transform(y.cpu()).numpy())
+            pred = model(x, base_adj, od_patterns=od_flow,
+                         hour_idx=hour, dow_idx=dow,
+                         spatial_cluster=spatial_cluster,
+                         temporal_cluster=tc)
 
-    return np.mean(losses), compute_all_metrics(
-        np.concatenate(preds), np.concatenate(trues))
+            loss = criterion(pred, y)
+            losses.append(loss.item())
 
+            pred_real = scaler.inverse_transform(pred.cpu())
+            true_real = scaler.inverse_transform(y.cpu())
+            preds.append(pred_real.numpy())
+            trues.append(true_real.numpy())
 
-def train_one_epoch(model, loader, criterion, optimizer, device, base_adj,
-                    max_grad_norm, log_every, od_patterns=None, use_time=False):
-    model.train()
-    losses = []
-    for i, batch in enumerate(loader):
-        x, y = batch[0].to(device), batch[1].to(device)
-        hour = batch[2].to(device) if use_time and len(batch) > 2 else None
-        dow = batch[3].to(device) if use_time and len(batch) > 3 else None
-
-        optimizer.zero_grad()
-        pred = model(x, base_adj, od_patterns=od_patterns,
-                     hour_idx=hour, dow_idx=dow)
-        loss = criterion(pred, y)
-        loss.backward()
-        if max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-        optimizer.step()
-        losses.append(loss.item())
-
-        if log_every > 0 and (i + 1) % log_every == 0:
-            print(f"    batch {i+1}/{len(loader)}, loss={loss.item():.4f}")
-
-    return np.mean(losses)
+    preds = np.concatenate(preds)
+    trues = np.concatenate(trues)
+    metrics = compute_all_metrics(preds, trues)
+    return np.mean(losses), metrics
 
 
 def main():
     args = parse_args()
     config = load_config(args.config)
+
+    # CLI overrides
     if args.epochs: config['train']['epochs'] = args.epochs
     if args.lr: config['train']['lr'] = args.lr
     if args.batch_size: config['train']['batch_size'] = args.batch_size
@@ -101,15 +108,21 @@ def main():
 
     use_fg = mcfg.get('use_flow_gate', False)
     use_te = mcfg.get('use_time_embed', False)
+    use_cl = mcfg.get('use_cluster', False)
+    use_time = use_te or use_fg  # need time indices for either
 
     print("=" * 60)
     print("Training: Traffic Demand Prediction")
     print("=" * 60)
     print(f"Device: {device}")
-    print(f"Flow Gate: {use_fg}, Time Embed: {use_te}")
+    print(f"Config: {args.config}")
+    print(f"FlowGate: {use_fg}, TimeEmbed: {use_te}, Cluster: {use_cl}")
 
-    # Data
-    train_loader, val_loader, test_loader, scaler, adj = build_dataloaders(config)
+    # ---- Data ----
+    result = build_dataloaders(config)
+    train_loader, val_loader, test_loader, scaler, adj = result[:5]
+    cluster_info = result[5] if len(result) > 5 else None
+
     if adj is not None:
         base_adj = torch.FloatTensor(adj).to(device)
     else:
@@ -120,7 +133,14 @@ def main():
 
     od_patterns = load_od_patterns(config, device)
 
-    # Model
+    # Spatial cluster labels → to device (stays there, reused every batch)
+    spatial_cluster = None
+    if use_cl and cluster_info is not None:
+        spatial_cluster = cluster_info['spatial_labels'].to(device)
+        print(f"[CLUSTER] Spatial: {cluster_info['n_spatial']} clusters, "
+              f"Temporal: {cluster_info['n_temporal']} clusters")
+
+    # ---- Model ----
     model = TrafficPredNet.from_config(config).to(device)
     print_model_params(model)
 
@@ -136,24 +156,55 @@ def main():
     history = {'train_loss': [], 'val_loss': [],
                'val_MAE': [], 'val_RMSE': [], 'val_MAPE': []}
 
-    print(f"\nStart training: {tcfg['epochs']} epochs, "
-          f"lr={tcfg['lr']}, batch_size={tcfg['batch_size']}")
+    n_epochs = tcfg['epochs']
+    log_every = tcfg.get('log_every', 10)
+    n_batches = len(train_loader)
+
+    print(f"\nStart training: {n_epochs} epochs, lr={tcfg['lr']}, "
+          f"batch_size={tcfg['batch_size']}")
     print("-" * 60)
 
-    total_start = time.time()
-    for epoch in range(1, tcfg['epochs'] + 1):
+    for epoch in range(1, n_epochs + 1):
         t0 = time.time()
+        model.train()
+        epoch_losses = []
 
-        train_loss = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, base_adj,
-            tcfg['max_grad_norm'], tcfg['log_every'],
-            od_patterns=od_patterns, use_time=use_te)
+        for i, batch in enumerate(train_loader):
+            x = batch[0].to(device)
+            y = batch[1].to(device)
+            hour = batch[2].to(device) if use_time and len(batch) > 2 else None
+            dow = batch[3].to(device) if use_time and len(batch) > 3 else None
+            tc = batch[4].to(device) if use_cl and len(batch) > 4 else None
 
+            optimizer.zero_grad()
+            pred = model(x, base_adj, od_patterns=od_patterns,
+                         hour_idx=hour, dow_idx=dow,
+                         spatial_cluster=spatial_cluster,
+                         temporal_cluster=tc)
+
+            loss = criterion(pred, y)
+            loss.backward()
+
+            if tcfg['max_grad_norm'] > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), tcfg['max_grad_norm'])
+            optimizer.step()
+            epoch_losses.append(loss.item())
+
+            if log_every > 0 and (i + 1) % log_every == 0:
+                print(f"    batch {i+1}/{n_batches}, "
+                      f"loss={loss.item():.4f}")
+
+        train_loss = np.mean(epoch_losses)
+
+        # ---- Validation ----
         val_loss, val_metrics = evaluate(
             model, val_loader, criterion, scaler, device, base_adj,
-            od_patterns=od_patterns, use_time=use_te)
+            od_flow=od_patterns, use_time=use_time, use_cluster=use_cl,
+            spatial_cluster=spatial_cluster)
 
         scheduler.step(val_loss)
+        lr = optimizer.param_groups[0]['lr']
         elapsed = time.time() - t0
 
         history['train_loss'].append(train_loss)
@@ -162,46 +213,51 @@ def main():
         history['val_RMSE'].append(val_metrics['RMSE'])
         history['val_MAPE'].append(val_metrics['MAPE'])
 
-        lr_now = optimizer.param_groups[0]['lr']
-        print(f"Epoch {epoch:3d}/{tcfg['epochs']} | "
-              f"train={train_loss:.4f} val={val_loss:.4f} | "
-              f"MAE={val_metrics['MAE']:.3f} RMSE={val_metrics['RMSE']:.3f} "
+        print(f"Epoch {epoch:3d}/{n_epochs} | "
+              f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | "
+              f"MAE={val_metrics['MAE']:.3f} "
+              f"RMSE={val_metrics['RMSE']:.3f} "
               f"MAPE={val_metrics['MAPE']:.2f}% | "
-              f"lr={lr_now:.6f} | {elapsed:.1f}s")
+              f"lr={lr:.6f} | {elapsed:.1f}s")
 
+        # ---- Early stopping ----
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_epoch = epoch
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(save_dir, 'best_model.pt'))
+            ckpt = os.path.join(save_dir, 'best_model.pt')
+            torch.save(model.state_dict(), ckpt)
         else:
             patience_counter += 1
             if patience_counter >= tcfg['early_stop_patience']:
-                print(f"\nEarly stopping at epoch {epoch}. Best: {best_epoch}")
+                print(f"\nEarly stopping at epoch {epoch} "
+                      f"(best: epoch {best_epoch})")
                 break
 
-    total_time = time.time() - total_start
-    print(f"\nTraining finished in {total_time/60:.1f} min")
+    # ---- Save history ----
+    hist_path = os.path.join(save_dir, 'train_history.json')
+    with open(hist_path, 'w') as f:
+        json.dump(history, f, indent=2)
+    print(f"\nTraining history saved to {hist_path}")
 
-    # Test
+    # ---- Test with best model ----
     print("\n" + "=" * 60)
     print("Evaluating on test set (best model)...")
     print("=" * 60)
-    model.load_state_dict(torch.load(
-        os.path.join(save_dir, 'best_model.pt'), weights_only=True))
-    _, test_metrics = evaluate(
+
+    best_ckpt = os.path.join(save_dir, 'best_model.pt')
+    model.load_state_dict(torch.load(best_ckpt, map_location=device,
+                                     weights_only=True))
+
+    test_loss, test_metrics = evaluate(
         model, test_loader, criterion, scaler, device, base_adj,
-        od_patterns=od_patterns, use_time=use_te)
+        od_flow=od_patterns, use_time=use_time, use_cluster=use_cl,
+        spatial_cluster=spatial_cluster)
 
     print(f"\n  Test MAE:  {test_metrics['MAE']:.4f}")
     print(f"  Test RMSE: {test_metrics['RMSE']:.4f}")
     print(f"  Test MAPE: {test_metrics['MAPE']:.2f}%")
-
-    results = {'best_epoch': best_epoch, 'test_metrics': test_metrics,
-               'history': history, 'config': config,
-               'total_time_min': total_time / 60}
-    with open(os.path.join(save_dir, 'results.json'), 'w') as f:
-        json.dump(results, f, indent=2, default=str)
+    print(f"\n  Best epoch: {best_epoch}")
 
 
 if __name__ == '__main__':

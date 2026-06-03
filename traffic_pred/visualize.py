@@ -36,7 +36,7 @@ plt.rcParams.update({
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--config', default='configs/nyctaxi.yaml')
+    p.add_argument('--config', default='configs/nyctaxi_cluster.yaml')
     p.add_argument('--save_dir', default='figures/')
     return p.parse_args()
 
@@ -341,15 +341,15 @@ def main():
     print(f"Output: {save_dir}\n")
 
     # Load predictions
-    pred_path = get_project_path('checkpoints', 'test_predictions.npz')
+    pred_path = get_project_path('figures', 'test_predictions.npz')
     if not os.path.exists(pred_path):
         print("[ERROR] No predictions found. Run evaluate.py first:")
         print("  python evaluate.py")
         return
 
     data = np.load(pred_path)
-    preds = data['preds']  # (samples, 1, N, C)
-    trues = data['trues']
+    preds = data['predictions']
+    trues = data['ground_truth']
     print(f"Loaded predictions: {preds.shape}")
 
     grid_rows = config['data']['grid_rows']

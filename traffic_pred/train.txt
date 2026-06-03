@@ -1,117 +1,3 @@
-============================================================
-Training: Traffic Demand Prediction
-============================================================
-Device: cuda:0
-Dataset: NYCTaxi
-[DATA] Found ST-SSL layout in D:\0BigData\22Data_Warehousing_and_Data_Mining\code\traffic_pred\data/processed/NYCTaxi
-  x_train: (1912, 35, 200, 2), y_train: (1912, 1, 200, 2)
-  x_val:   (274, 35, 200, 2),   y_val:   (274, 1, 200, 2)
-  x_test:  (546, 35, 200, 2),  y_test:  (546, 1, 200, 2) 
-  adj:     (200, 200)
-  Samples: train=1912, val=274, test=546
-Trainable parameters: 286,181
-
-Start training: 100 epochs, lr=0.001, batch_size=64      
-------------------------------------------------------------
-    batch 10/29, loss=1.1279
-    batch 20/29, loss=1.0612
-Epoch   1/100 | train_loss=1.1377 | val_loss=1.1509 | MAE=34.644 RMSE=73.808 MAPE=94.85% | lr=0.001000 | 326.6s   
-    batch 10/29, loss=1.0992
-    batch 20/29, loss=1.1162
-Epoch   2/100 | train_loss=1.0784 | val_loss=1.0956 | MAE=34.394 RMSE=73.287 MAPE=97.56% | lr=0.001000 | 324.8s   
-    batch 10/29, loss=1.0281
-    batch 20/29, loss=1.0305
-Epoch   3/100 | train_loss=1.0194 | val_loss=1.0454 | MAE=34.180 RMSE=72.953 MAPE=100.41% | lr=0.001000 | 330.9s  
-    batch 10/29, loss=1.0012
-    batch 20/29, loss=1.0021
-PS D:\0BigData\22Data_Warehousing_and_Data_Mining>  d:; cd 'd:\0BigData\22Data_Warehousing_and_Data_Mining'; & 'c:\Users\10777\anaconda3\envs\Diff2\python.exe' 'c:\Users\10777\.vscode\extensions\ms-python.debugpy-2026.6.0-win32-x64\bundled\libs\debugpy\launcher' '61174' '--' 'D:\0BigData\22Data_Warehousing_and_Data_Mining\code\traffic_pred\train.py'
-============================================================
-Training: Traffic Demand Prediction
-============================================================
-Device: cuda:0
-Dataset: NYCTaxi
-[DATA] Found ST-SSL layout in D:\0BigData\22Data_Warehousing_and_Data_Mining\code\traffic_pred\data/processed/NYCTaxi
-  x_train: (1912, 35, 200, 2), y_train: (1912, 1, 200, 2)
-  x_val:   (274, 35, 200, 2),   y_val:   (274, 1, 200, 2)
-  x_test:  (546, 35, 200, 2),  y_test:  (546, 1, 200, 2) 
-  adj:     (200, 200)
-  Samples: train=1912, val=274, test=546
-Trainable parameters: 286,181
-
-Start training: 20 epochs, lr=0.001, batch_size=64       
-------------------------------------------------------------
-    batch 10/29, loss=1.1279
-    batch 20/29, loss=1.0612
-Epoch   1/20 | train_loss=1.1377 | val_loss=1.1509 | MAE=34.644 RMSE=73.808 MAPE=94.85% | lr=0.001000 | 313.3s    
-    batch 10/29, loss=1.0992
-    batch 20/29, loss=1.1162
-Epoch   2/20 | train_loss=1.0784 | val_loss=1.0956 | MAE=34.394 RMSE=73.287 MAPE=97.56% | lr=0.001000 | 303.9s    
-    batch 10/29, loss=1.0281
-    batch 20/29, loss=1.0305
-Epoch   3/20 | train_loss=1.0194 | val_loss=1.0454 | MAE=34.180 RMSE=72.953 MAPE=100.41% | lr=0.001000 | 310.4s   
-    batch 10/29, loss=1.0012
-    batch 20/29, loss=1.0021
-Epoch   4/20 | train_loss=0.9699 | val_loss=0.9925 | MAE=34.271 RMSE=73.562 MAPE=104.87% | lr=0.001000 | 316.2s   
-    batch 10/29, loss=0.9457
-    batch 20/29, loss=0.8587
-Epoch   5/20 | train_loss=0.9315 | val_loss=0.9775 | MAE=34.512 RMSE=73.986 MAPE=106.35% | lr=0.001000 | 310.1s   
-    batch 10/29, loss=0.9349
-    batch 20/29, loss=0.9982
-Epoch   6/20 | train_loss=0.9228 | val_loss=0.9484 | MAE=34.281 RMSE=73.780 MAPE=107.62% | lr=0.001000 | 311.1s   
-    batch 10/29, loss=0.9367
-    batch 20/29, loss=0.9324
-Epoch   7/20 | train_loss=0.8841 | val_loss=0.9006 | MAE=34.154 RMSE=73.835 MAPE=110.20% | lr=0.001000 | 323.2s   
-    batch 10/29, loss=0.8756
-    batch 20/29, loss=0.8994
-Epoch   8/20 | train_loss=0.8494 | val_loss=0.8609 | MAE=34.427 RMSE=74.854 MAPE=114.06% | lr=0.001000 | 323.2s   
-    batch 10/29, loss=0.7859
-    batch 20/29, loss=0.7395
-Epoch   9/20 | train_loss=0.7993 | val_loss=0.8390 | MAE=34.981 RMSE=76.398 MAPE=118.00% | lr=0.001000 | 309.4s   
-    batch 10/29, loss=0.7811
-    batch 20/29, loss=0.7810
-Epoch  10/20 | train_loss=0.7795 | val_loss=0.8139 | MAE=35.371 RMSE=77.510 MAPE=120.70% | lr=0.001000 | 867.3s   
-    batch 10/29, loss=0.7635
-    batch 20/29, loss=0.7521
-Epoch  11/20 | train_loss=0.7916 | val_loss=0.8478 | MAE=35.372 RMSE=77.470 MAPE=119.21% | lr=0.001000 | 310.3s   
-    batch 10/29, loss=0.8100
-    batch 20/29, loss=0.7793
-Epoch  12/20 | train_loss=0.7831 | val_loss=0.8143 | MAE=35.240 RMSE=77.516 MAPE=120.74% | lr=0.001000 | 307.3s   
-    batch 10/29, loss=0.7690
-    batch 20/29, loss=0.7511
-Epoch  13/20 | train_loss=0.7767 | val_loss=0.8077 | MAE=35.711 RMSE=78.362 MAPE=122.53% | lr=0.001000 | 321.0s   
-    batch 10/29, loss=0.6945
-    batch 20/29, loss=0.7999
-Epoch  14/20 | train_loss=0.7527 | val_loss=0.7872 | MAE=36.346 RMSE=80.095 MAPE=126.20% | lr=0.001000 | 314.3s   
-    batch 10/29, loss=0.7566
-    batch 20/29, loss=0.6992
-Epoch  15/20 | train_loss=0.7469 | val_loss=0.7867 | MAE=35.358 RMSE=77.566 MAPE=121.44% | lr=0.001000 | 319.9s   
-    batch 10/29, loss=0.7598
-    batch 20/29, loss=0.7394
-Epoch  16/20 | train_loss=0.7536 | val_loss=0.7990 | MAE=34.844 RMSE=76.141 MAPE=118.80% | lr=0.001000 | 315.0s   
-    batch 10/29, loss=0.7631
-    batch 20/29, loss=0.7156
-Epoch  17/20 | train_loss=0.7572 | val_loss=0.7953 | MAE=34.662 RMSE=76.080 MAPE=119.49% | lr=0.001000 | 305.3s   
-    batch 10/29, loss=0.7328
-    batch 20/29, loss=0.7351
-Epoch  18/20 | train_loss=0.7395 | val_loss=0.7745 | MAE=35.227 RMSE=76.840 MAPE=121.60% | lr=0.001000 | 309.0s   
-    batch 10/29, loss=0.7076
-    batch 20/29, loss=0.8204
-Epoch  19/20 | train_loss=0.7536 | val_loss=0.8119 | MAE=34.010 RMSE=74.469 MAPE=116.23% | lr=0.001000 | 308.6s   
-    batch 10/29, loss=0.7696
-    batch 20/29, loss=0.7818
-Epoch  20/20 | train_loss=0.7831 | val_loss=0.8178 | MAE=34.301 RMSE=75.058 MAPE=116.83% | lr=0.001000 | 312.3s   
-
-Training finished in 113.5 min
-
-============================================================
-Evaluating on test set (best model)...
-============================================================
-
-  Test MAE:  35.9614
-  Test RMSE: 78.2552
-  Test MAPE: 116.47%
-
-
 
 baseline
 epoch 30
@@ -124,8 +10,10 @@ Transformer             23.4115    56.8739      91.72
 LSTM                    24.0917    56.2191      91.44    
 TCN                     27.4368    61.6216      95.35    
 CCRNN (ours)            35.9614    78.2552     116.47
+CCRNN_cluster(ours)     23.4532    56.2667      91.36
 CCRNN_new(ours)         23.8922    56.9182      92.16
 Flow-gate (ours)        23.2362    55.2796      89.31 24.4049 58.2460 92.88
+with_time_embedding     24.0564    56.7125      93.10
 STGCN                   32.9078    74.4725     116.64
 CCRNN                   37.5333    82.7092     125.27
 HA                      36.1431    77.9905      96.88    
@@ -341,9 +229,10 @@ epoch 100
 Model                       MAE       RMSE    MAPE(%)       Params
 ----------------------------------------------------------------------
 Last-value              11.4440    24.8319      26.68
+CCRNN + cluster(ours)   21.8198    52.6962      86.47
 CCRNN (ours)            21.9487    53.0151      87.58
 CCRNN + flow gate       22.8174    55.0188      89.90
-+time embedding         22.2246    54.0855      88.43%
++time embedding         22.2246    54.0855      88.43
 LSTM                    22.5491    54.4021      90.20
 MLP                     23.6396    57.7717      96.93
 Transformer             23.8372    58.7160      96.96

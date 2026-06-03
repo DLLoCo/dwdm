@@ -1,40 +1,57 @@
 """
 Data loader for NYC traffic demand prediction.
 
-Supports three data layouts:
-
-  Layout A — ST-SSL style:
+Supports two data layouts:
+  Layout A — ST-SSL style (recommended):
     data_dir/train.npz, val.npz, test.npz, adj_mx.npz
-    Non-consecutive 35-step windows.
+  Layout B — single file with (T, N, C)
+  Fallback — synthetic data for pipeline testing
 
-  Layout B — Continuous (recommended):
-    Single demand.npz with (T, N, C) raw time series.
-    Consecutive sliding window, real timestamps.
-    Triggered by: data_mode: continuous in config.
-
-  Fallback — synthetic data for pipeline testing.
+v6 addition: when config has use_cluster=True, computes dual clusters
+and returns cluster_info as 6th return value.
 """
 import os
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import Dataset, DataLoader, TensorDataset
 from lib.utils import StandardScaler, get_project_path
 
 
 # ============================================================
-# Helpers
+# Dataset (for single-file raw time series)
 # ============================================================
 
-def load_adj(data_dir: str):
-    adj_path = os.path.join(data_dir, 'adj_mx.npz')
-    if os.path.exists(adj_path):
-        npz = np.load(adj_path, allow_pickle=True)
-        key = 'adj_mx' if 'adj_mx' in npz else list(npz.keys())[0]
-        return npz[key].astype(np.float32)
-    return None
+class TrafficDataset(Dataset):
+    """Sliding-window dataset: raw (T, N, C) → (x, y) pairs."""
 
+    def __init__(self, data: np.ndarray, input_len: int, output_len: int):
+        super().__init__()
+        self.data = data.astype(np.float32)
+        self.input_len = input_len
+        self.output_len = output_len
+        self.total_len = input_len + output_len
+        self.num_samples = len(data) - self.total_len + 1
+        if self.num_samples <= 0:
+            raise ValueError(
+                f"Data length {len(data)} too short for "
+                f"input_len={input_len} + output_len={output_len}"
+            )
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        x = self.data[idx: idx + self.input_len]
+        y = self.data[idx + self.input_len: idx + self.total_len]
+        return torch.FloatTensor(x), torch.FloatTensor(y)
+
+
+# ============================================================
+# NPZ loading helpers
+# ============================================================
 
 def _load_xy_from_npz(path: str):
+    """Load pre-windowed (X, Y) from ST-SSL format .npz."""
     npz = np.load(path, allow_pickle=True)
     keys = list(npz.keys())
     x_key = 'X' if 'X' in keys else ('x' if 'x' in keys else None)
@@ -44,209 +61,205 @@ def _load_xy_from_npz(path: str):
     return None
 
 
-def _make_loader(x, y, hour, dow, batch_size, shuffle):
-    ds = TensorDataset(torch.FloatTensor(x), torch.FloatTensor(y),
-                       torch.LongTensor(hour), torch.LongTensor(dow))
-    return DataLoader(ds, batch_size=batch_size,
-                      shuffle=shuffle, drop_last=shuffle)
+def _load_raw_array(path: str) -> np.ndarray:
+    """Load a raw (T, N, C) array from .npz."""
+    npz = np.load(path, allow_pickle=True)
+    for key in ['data', 'arr_0', 'flow_data', 'demand']:
+        if key in npz:
+            return npz[key].astype(np.float32)
+    keys = list(npz.keys())
+    if keys:
+        return npz[keys[0]].astype(np.float32)
+    raise KeyError(f"No data found in {path}")
+
+
+def load_adj(data_dir: str):
+    """Load adjacency matrix from adj_mx.npz if it exists."""
+    adj_path = os.path.join(data_dir, 'adj_mx.npz')
+    if os.path.exists(adj_path):
+        npz = np.load(adj_path, allow_pickle=True)
+        for key in ['adj_mx', 'adj', 'arr_0']:
+            if key in npz:
+                return npz[key].astype(np.float32)
+        keys = list(npz.keys())
+        if keys:
+            return npz[keys[0]].astype(np.float32)
+    return None
+
+
+def generate_synthetic_data(num_nodes=200, num_features=2,
+                            num_days=84, steps_per_day=48):
+    """Generate synthetic data for pipeline testing."""
+    T = num_days * steps_per_day
+    t = np.arange(T)
+    daily = np.sin(2 * np.pi * (t % steps_per_day) / steps_per_day)
+    weekly = 0.3 * np.sin(2 * np.pi * (t % (7 * steps_per_day)) /
+                          (7 * steps_per_day))
+    base = daily + weekly
+    data = np.zeros((T, num_nodes, num_features), dtype=np.float32)
+    rng = np.random.RandomState(42)
+    for n in range(num_nodes):
+        scale = rng.exponential(50)
+        for c in range(num_features):
+            noise = rng.randn(T) * 0.1
+            data[:, n, c] = np.maximum(0, scale * (base + noise + 1))
+    return data
 
 
 # ============================================================
-# Layout B: Continuous sliding window
-# ============================================================
-
-def _build_continuous(config):
-    """
-    Load (T, N, C) demand tensor, split temporally, create sliding windows.
-    Returns: train_loader, val_loader, test_loader, scaler, adj
-    """
-    dcfg = config['data']
-    tcfg = config['train']
-    batch_size = tcfg['batch_size']
-    input_len = dcfg['input_len']
-    output_len = dcfg['output_len']
-    start_dow = dcfg.get('start_weekday', 3)  # 2015-01-01 = Thursday
-
-    # --- Load demand ---
-    demand_path = dcfg['demand_path']
-    if not os.path.isabs(demand_path):
-        demand_path = get_project_path(demand_path)
-
-    raw = np.load(demand_path)
-    key = 'data' if 'data' in raw else list(raw.keys())[0]
-    data = raw[key].astype(np.float32)  # (T, N, C)
-    T, N, C = data.shape
-    print(f"[DATA] Continuous mode: {demand_path}")
-    print(f"  Shape: ({T}, {N}, {C}) = {T/48:.1f} days")
-
-    # --- Load adjacency (optional) ---
-    adj = None
-    # Try ST-SSL adj first
-    stssl_dir = get_project_path('data', 'processed', 'NYCTaxi')
-    if os.path.isdir(stssl_dir):
-        adj = load_adj(stssl_dir)
-        if adj is not None:
-            print(f"  Adj: loaded from {stssl_dir}, shape={adj.shape}")
-
-    # --- Temporal split (no shuffling across splits!) ---
-    n_train = int(T * dcfg['train_ratio'])
-    n_val = int(T * dcfg['val_ratio'])
-    n_test = T - n_train - n_val
-
-    data_train = data[:n_train]
-    data_val = data[n_train:n_train + n_val]
-    data_test = data[n_train + n_val:]
-
-    print(f"  Split: train={n_train} val={n_val} test={n_test} steps")
-
-    # --- Normalize (fit on train only) ---
-    scaler = StandardScaler()
-    scaler.fit(data_train)
-    data_train = scaler.transform(data_train)
-    data_val = scaler.transform(data_val)
-    data_test = scaler.transform(data_test)
-
-    # --- Sliding window + time indices ---
-    window = input_len + output_len
-
-    def make_windows(d, offset):
-        """
-        d: (T_split, N, C) normalized data
-        offset: absolute time step index of d[0] in the full series
-        Returns: x, y, hour_slots, day_of_weeks
-        """
-        n = len(d) - window + 1
-        if n <= 0:
-            raise ValueError(f"Split too short: {len(d)} < {window}")
-
-        xs = np.zeros((n, input_len, N, C), dtype=np.float32)
-        ys = np.zeros((n, output_len, N, C), dtype=np.float32)
-        hours = np.zeros(n, dtype=np.int64)
-        dows = np.zeros(n, dtype=np.int64)
-
-        for i in range(n):
-            xs[i] = d[i:i + input_len]
-            ys[i] = d[i + input_len:i + window]
-
-            # Target time step = offset + i + input_len
-            target_step = offset + i + input_len
-            hours[i] = target_step % 48                         # 0-47
-            dows[i] = ((target_step // 48) + start_dow) % 7     # 0=Mon
-
-        return xs, ys, hours, dows
-
-    x_train, y_train, h_train, d_train = make_windows(data_train, 0)
-    x_val, y_val, h_val, d_val = make_windows(data_val, n_train)
-    x_test, y_test, h_test, d_test = make_windows(data_test, n_train + n_val)
-
-    print(f"  Samples: train={len(x_train)}, val={len(x_val)}, test={len(x_test)}")
-    print(f"  x: ({x_train.shape[0]}, {input_len}, {N}, {C}) → "
-          f"y: ({y_train.shape[0]}, {output_len}, {N}, {C})")
-
-    # --- DataLoaders ---
-    train_loader = _make_loader(x_train, y_train, h_train, d_train, batch_size, True)
-    val_loader = _make_loader(x_val, y_val, h_val, d_val, batch_size, False)
-    test_loader = _make_loader(x_test, y_test, h_test, d_test, batch_size, False)
-
-    return train_loader, val_loader, test_loader, scaler, adj
-
-
-# ============================================================
-# Layout A: ST-SSL pre-windowed
-# ============================================================
-
-def _build_stssl(config):
-    """Load ST-SSL split files (train/val/test.npz)."""
-    dcfg = config['data']
-    tcfg = config['train']
-    batch_size = tcfg['batch_size']
-
-    data_dir = dcfg.get('data_dir', '')
-    if data_dir and not os.path.isabs(data_dir):
-        data_dir = get_project_path(data_dir)
-
-    print(f"[DATA] ST-SSL layout in {data_dir}")
-    adj = load_adj(data_dir)
-
-    x_train, y_train = _load_xy_from_npz(os.path.join(data_dir, 'train.npz'))
-    x_val, y_val = _load_xy_from_npz(os.path.join(data_dir, 'val.npz'))
-    x_test, y_test = _load_xy_from_npz(os.path.join(data_dir, 'test.npz'))
-
-    print(f"  x_train: {x_train.shape}, y_train: {y_train.shape}")
-
-    # Normalize
-    scaler = StandardScaler()
-    all_train = x_train.reshape(-1, x_train.shape[-2], x_train.shape[-1])
-    scaler.fit(all_train)
-
-    def normalize(x, y):
-        sx, sy = x.shape, y.shape
-        xn = scaler.transform(x.reshape(-1, sx[-2], sx[-1])).reshape(sx)
-        yn = scaler.transform(y.reshape(-1, sy[-2], sy[-1])).reshape(sy)
-        return xn, yn
-
-    x_train, y_train = normalize(x_train, y_train)
-    x_val, y_val = normalize(x_val, y_val)
-    x_test, y_test = normalize(x_test, y_test)
-
-    # Time indices (approximate, from sample index)
-    def compute_time_indices(n_samples, offset):
-        idx = np.arange(n_samples) + offset
-        return (idx % 48).astype(np.int64), (((idx // 48) + 3) % 7).astype(np.int64)
-
-    offset0 = 144  # 3-day lookback
-    h_tr, d_tr = compute_time_indices(len(x_train), offset0)
-    h_va, d_va = compute_time_indices(len(x_val), offset0 + len(x_train))
-    h_te, d_te = compute_time_indices(len(x_test), offset0 + len(x_train) + len(x_val))
-
-    print(f"  Samples: train={len(x_train)}, val={len(x_val)}, test={len(x_test)}")
-
-    train_loader = _make_loader(x_train, y_train, h_tr, d_tr, batch_size, True)
-    val_loader = _make_loader(x_val, y_val, h_va, d_va, batch_size, False)
-    test_loader = _make_loader(x_test, y_test, h_te, d_te, batch_size, False)
-
-    return train_loader, val_loader, test_loader, scaler, adj
-
-
-# ============================================================
-# Main entry
+# Main builder
 # ============================================================
 
 def build_dataloaders(config):
     """
-    Build train/val/test dataloaders based on config.
+    Build train/val/test DataLoaders from config.
 
-    Returns: (train_loader, val_loader, test_loader, scaler, adj)
-        Each loader yields: (x, y, hour_slot, day_of_week)
-        - x: (B, T_in, N, C)   input sequence
-        - y: (B, T_out, N, C)  prediction target
-        - hour_slot: (B,)      0-47, target time's half-hour of day
-        - day_of_week: (B,)    0-6, Mon=0
+    Returns: (train_loader, val_loader, test_loader, scaler, adj, cluster_info)
+      - adj may be None
+      - cluster_info is None when use_cluster=False, otherwise a dict with:
+          'spatial_labels':   (N,) int64 tensor
+          'n_spatial':        int
+          'n_temporal':       int
     """
     dcfg = config['data']
+    tcfg = config['train']
+    mcfg = config['model']
+    batch_size = tcfg['batch_size']
 
-    # Route to appropriate layout
-    mode = dcfg.get('data_mode', 'auto')
+    use_cluster = mcfg.get('use_cluster', False)
 
-    if mode == 'continuous':
-        return _build_continuous(config)
-
-    # Auto-detect: check for ST-SSL files
+    # ---- Try Layout A: ST-SSL split files ----
     data_dir = dcfg.get('data_dir', '')
     if data_dir and not os.path.isabs(data_dir):
         data_dir = get_project_path(data_dir)
     train_path = os.path.join(data_dir, 'train.npz') if data_dir else ''
 
     if data_dir and os.path.exists(train_path):
-        return _build_stssl(config)
+        print(f"[DATA] Found ST-SSL layout in {data_dir}")
+        adj = load_adj(data_dir)
 
-    # Fallback: check for demand file
-    demand_path = dcfg.get('demand_path', '')
-    if demand_path:
-        config['data']['data_mode'] = 'continuous'
-        return _build_continuous(config)
+        result = _load_xy_from_npz(train_path)
+        if result is not None:
+            x_train, y_train = result
+            x_val, y_val = _load_xy_from_npz(os.path.join(data_dir, 'val.npz'))
+            x_test, y_test = _load_xy_from_npz(os.path.join(data_dir, 'test.npz'))
 
-    raise FileNotFoundError(
-        "No data found. Set data_mode: continuous with demand_path, "
-        "or provide ST-SSL files in data_dir."
-    )
+            print(f"  x_train: {x_train.shape}, y_train: {y_train.shape}")
+            print(f"  x_val:   {x_val.shape},   y_val:   {y_val.shape}")
+            print(f"  x_test:  {x_test.shape},  y_test:  {y_test.shape}")
+            if adj is not None:
+                print(f"  adj:     {adj.shape}")
+
+            # ---- Clustering (v6): compute BEFORE normalization ----
+            cluster_info = None
+            tc_train = tc_val = tc_test = None
+
+            if use_cluster:
+                from lib.cluster_builder import build_clusters
+                n_sp = mcfg.get('n_spatial_clusters', 5)
+                n_tp = mcfg.get('n_temporal_clusters', 5)
+                cl = build_clusters(x_train, x_val, x_test,
+                                    n_spatial=n_sp, n_temporal=n_tp)
+                cluster_info = {
+                    'spatial_labels': torch.LongTensor(cl['spatial_labels']),
+                    'n_spatial': cl['n_spatial'],
+                    'n_temporal': cl['n_temporal'],
+                    'detail': cl,  # for visualization
+                }
+                tc_train = cl['temporal_train']
+                tc_val = cl['temporal_val']
+                tc_test = cl['temporal_test']
+
+            # ---- Normalize ----
+            scaler = StandardScaler()
+            all_train = x_train.reshape(-1, x_train.shape[-2],
+                                        x_train.shape[-1])
+            scaler.fit(all_train)
+
+            def normalize(x, y):
+                sx = x.shape
+                x_n = scaler.transform(
+                    x.reshape(-1, sx[-2], sx[-1])).reshape(sx)
+                sy = y.shape
+                y_n = scaler.transform(
+                    y.reshape(-1, sy[-2], sy[-1])).reshape(sy)
+                return x_n, y_n
+
+            x_train, y_train = normalize(x_train, y_train)
+            x_val, y_val = normalize(x_val, y_val)
+            x_test, y_test = normalize(x_test, y_test)
+
+            # ---- Time indices (approximate) ----
+            def compute_time_indices(n_samples, offset):
+                indices = np.arange(n_samples) + offset
+                hour_slot = indices % 48
+                day_of_week = ((indices // 48) + 3) % 7  # Jan 1 2015 = Thu
+                return hour_slot.astype(np.int64), day_of_week.astype(np.int64)
+
+            offset0 = 144
+            h_train, d_train = compute_time_indices(len(x_train), offset0)
+            h_val, d_val = compute_time_indices(
+                len(x_val), offset0 + len(x_train))
+            h_test, d_test = compute_time_indices(
+                len(x_test), offset0 + len(x_train) + len(x_val))
+            print(f"  Time indices: hour_slot [0-47], day_of_week [0-6]")
+
+            # ---- Build DataLoaders ----
+            def make_loader(x, y, hour, dow, tc, shuffle):
+                tensors = [torch.FloatTensor(x), torch.FloatTensor(y),
+                           torch.LongTensor(hour), torch.LongTensor(dow)]
+                if tc is not None:
+                    tensors.append(torch.LongTensor(tc))
+                ds = TensorDataset(*tensors)
+                return DataLoader(ds, batch_size=batch_size,
+                                  shuffle=shuffle, drop_last=shuffle)
+
+            print(f"  Samples: train={len(x_train)}, "
+                  f"val={len(x_val)}, test={len(x_test)}")
+
+            return (make_loader(x_train, y_train, h_train, d_train,
+                                tc_train, True),
+                    make_loader(x_val, y_val, h_val, d_val,
+                                tc_val, False),
+                    make_loader(x_test, y_test, h_test, d_test,
+                                tc_test, False),
+                    scaler, adj, cluster_info)
+
+    # ---- Fallback: synthetic ----
+    print("[WARNING] No real data found, using synthetic data for testing.")
+    data = generate_synthetic_data(
+        num_nodes=dcfg['num_nodes'], num_features=dcfg['input_dim'])
+
+    total = len(data)
+    t1 = int(total * dcfg['train_ratio'])
+    t2 = int(total * (dcfg['train_ratio'] + dcfg['val_ratio']))
+
+    scaler = StandardScaler().fit(data[:t1])
+    input_len = dcfg['input_len']
+    output_len = dcfg['output_len']
+    win = input_len + output_len
+
+    loaders = []
+    offset = 0
+    for d_raw, shuf in zip([data[:t1], data[t1:t2], data[t2:]],
+                           [True, False, False]):
+        d = scaler.transform(d_raw)
+        n = len(d) - win + 1
+        xs, ys = [], []
+        for i in range(n):
+            xs.append(d[i:i + input_len])
+            ys.append(d[i + input_len:i + win])
+        x_t = torch.FloatTensor(np.array(xs))
+        y_t = torch.FloatTensor(np.array(ys))
+        indices = np.arange(n) + offset
+        h_t = torch.LongTensor(indices % 48)
+        d_t = torch.LongTensor((indices // 48) % 7)
+        ds = TensorDataset(x_t, y_t, h_t, d_t)
+        loaders.append(DataLoader(ds, batch_size=batch_size,
+                                  shuffle=shuf, drop_last=shuf))
+        offset += n
+
+    print(f"  Samples: train={len(loaders[0].dataset)}, "
+          f"val={len(loaders[1].dataset)}, test={len(loaders[2].dataset)}")
+
+    return (*loaders, scaler, None, None)
