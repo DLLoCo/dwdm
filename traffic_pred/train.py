@@ -21,7 +21,7 @@ from model.net import TrafficPredNet
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--config', default='configs/ablation/with_flowgate.yaml')
+    p.add_argument('--config', default='configs/nyctaxi_memory.yaml')
     p.add_argument('--epochs', type=int, default=30)
     p.add_argument('--lr', type=float, default=None)
     p.add_argument('--batch_size', type=int, default=None)

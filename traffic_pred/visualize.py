@@ -36,7 +36,7 @@ plt.rcParams.update({
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--config', default='configs/nyctaxi_cluster.yaml')
+    p.add_argument('--config', default='configs/nyctaxi_memory.yaml')
     p.add_argument('--save_dir', default='figures/')
     return p.parse_args()
 
@@ -100,11 +100,13 @@ def plot_baseline_comparison(save_dir):
     # Hardcoded results — update with your actual numbers
     models = {
         'HA':          {'MAE': 36.14, 'RMSE': 77.99, 'MAPE': 96.88},
+        'STGCN':       {'MAE': 30.98, 'RMSE': 70.14, 'MAPE': 109.73},
+        'CCRNN':       {'MAE': 26.29, 'RMSE': 61.64, 'MAPE': 100.26},
         'TCN':         {'MAE': 25.05, 'RMSE': 58.81, 'MAPE': 93.35},
         'Transformer': {'MAE': 23.84, 'RMSE': 58.72, 'MAPE': 96.96},
         'MLP':         {'MAE': 23.64, 'RMSE': 57.77, 'MAPE': 96.93},
         'LSTM':        {'MAE': 22.55, 'RMSE': 54.40, 'MAPE': 90.20},
-        'Ours':        {'MAE': 21.95, 'RMSE': 53.02, 'MAPE': 87.58},
+        'Ours':        {'MAE': 17.14, 'RMSE': 37.62, 'MAPE': 66.86},
         'Last-value':  {'MAE': 11.44, 'RMSE': 24.83, 'MAPE': 26.68},
     }
 
@@ -145,7 +147,7 @@ def plot_baseline_comparison(save_dir):
 
 def plot_training_curve(save_dir):
     """Plot training and validation loss curves."""
-    results_path = get_project_path('checkpoints', 'results.json')
+    results_path = get_project_path('checkpoints/v7_memory', 'train_history.json')
     if not os.path.exists(results_path):
         print("  [SKIP] No results.json found")
         return
@@ -153,7 +155,7 @@ def plot_training_curve(save_dir):
     with open(results_path, 'r') as f:
         results = json.load(f)
 
-    history = results['history']
+    history = results
     epochs = range(1, len(history['train_loss']) + 1)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))

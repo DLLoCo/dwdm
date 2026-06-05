@@ -20,8 +20,8 @@ from model.net import TrafficPredNet
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--config', default='configs/ablation/with_flowgate.yaml')
-    p.add_argument('--checkpoint', default='checkpoints/best_model.pt')
+    p.add_argument('--config', default='configs/nyctaxi_memory.yaml')
+    p.add_argument('--checkpoint', default='checkpoints/v7_memory/best_model.pt')
     p.add_argument('--gpu', type=int, default=0)
     return p.parse_args()
 

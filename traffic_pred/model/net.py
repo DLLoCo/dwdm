@@ -1,13 +1,16 @@
 """
-TrafficPredNet v6 — TC + CGC + Dual Cluster + Residual Prediction
-==================================================================
-Ablation flags:
-  use_spatial_cluster:  Spatial Cluster Embedding (Challenge 2)
-  use_temporal_cluster: Temporal Cluster Embedding (Challenge 3)
-  use_residual:         Residual prediction (pred = last_obs + correction)
+TrafficPredNet v7 — TC + CGC + Spatial Cluster + Residual + Memory Bank
+========================================================================
+v6 → v7: Add learnable Memory Bank (inspired by GEnSHIN/MegaCRN)
+  - K learnable prototype vectors (tiny: K×D, e.g. 20×64)
+  - Each node queries the bank via attention → retrieves its pattern
+  - End-to-end trainable, no fixed OD matrices needed
+  - Replaces Flow Gate: lighter, more expressive, no OOM
 """
+import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from model.cgc import AdjacencyLearner
 from model.st_block import STBlock
 
@@ -36,7 +39,6 @@ class ClusterEmbedding(nn.Module):
         if use_temporal:
             self.temporal_embed = nn.Embedding(n_temporal, embed_dim)
 
-        # Gated fusion only when both active
         if use_spatial and use_temporal:
             self.gate = nn.Sequential(
                 nn.Linear(embed_dim * 2, embed_dim),
@@ -44,25 +46,80 @@ class ClusterEmbedding(nn.Module):
             )
 
     def forward(self, spatial_ids, temporal_ids):
-        """Returns (B, 1, N, D) additive embedding."""
         if self.use_spatial and self.use_temporal:
-            s = self.spatial_embed(spatial_ids)        # (N, D)
-            t = self.temporal_embed(temporal_ids)      # (B, D)
+            s = self.spatial_embed(spatial_ids)
+            t = self.temporal_embed(temporal_ids)
             B, N = t.shape[0], s.shape[0]
             s_exp = s.unsqueeze(0).expand(B, N, -1)
             t_exp = t.unsqueeze(1).expand(B, N, -1)
             gate = self.gate(torch.cat([s_exp, t_exp], dim=-1))
             out = gate * s_exp + (1 - gate) * t_exp
         elif self.use_spatial:
-            s = self.spatial_embed(spatial_ids)        # (N, D)
-            out = s.unsqueeze(0)                       # (1, N, D) → broadcasts
+            s = self.spatial_embed(spatial_ids)
+            out = s.unsqueeze(0)
         elif self.use_temporal:
-            t = self.temporal_embed(temporal_ids)      # (B, D)
-            out = t.unsqueeze(1)                       # (B, 1, D) → broadcasts
+            t = self.temporal_embed(temporal_ids)
+            out = t.unsqueeze(1)
         else:
             return None
+        return out.unsqueeze(1)
 
-        return out.unsqueeze(1)  # (B, 1, N, D) or broadcastable
+
+# ============================================================
+# Memory Bank (GEnSHIN/MegaCRN style)
+# ============================================================
+
+class MemoryBank(nn.Module):
+    """
+    Learnable traffic pattern memory bank.
+
+    Stores K prototype vectors. Each node queries the bank
+    via attention to retrieve its most relevant pattern.
+
+    GEnSHIN:  Q = H * Wq,  S = softmax(Q @ M^T / √d),  H_mem = S @ M
+    Ours:     Same, but applied per-node after ST blocks.
+
+    Unlike Flow Gate:
+      - No fixed OD matrices (fully learnable)
+      - Tiny memory: K×D (e.g. 20×64 = 1280 params)
+      - No OOM risk
+    """
+
+    def __init__(self, n_prototypes, hidden_dim):
+        super().__init__()
+        self.n_prototypes = n_prototypes
+        self.hidden_dim = hidden_dim
+
+        # Learnable pattern prototypes
+        self.prototypes = nn.Parameter(
+            torch.randn(n_prototypes, hidden_dim) * 0.02)
+
+        # Query projection
+        self.query_proj = nn.Linear(hidden_dim, hidden_dim)
+
+        # Output projection (fuse retrieved pattern with hidden state)
+        self.out_proj = nn.Linear(hidden_dim * 2, hidden_dim)
+
+    def forward(self, h):
+        """
+        h: (B, N, D) — encoder output (last step hidden state)
+        Returns: (B, N, D) — pattern-enhanced hidden state
+        """
+        # Query
+        Q = self.query_proj(h)                              # (B, N, D)
+
+        # Attention over prototypes
+        scores = torch.matmul(Q, self.prototypes.t())       # (B, N, K)
+        scores = scores / math.sqrt(self.hidden_dim)
+        attn = F.softmax(scores, dim=-1)                    # (B, N, K)
+
+        # Retrieve: weighted sum of prototypes
+        H_mem = torch.matmul(attn, self.prototypes)         # (B, N, D)
+
+        # Fuse with original hidden state
+        h_enhanced = self.out_proj(torch.cat([h, H_mem], dim=-1))  # (B, N, D)
+
+        return h_enhanced
 
 
 class TrafficPredNet(nn.Module):
@@ -74,7 +131,7 @@ class TrafficPredNet(nn.Module):
                  use_spatial_cluster=False, use_temporal_cluster=False,
                  n_spatial_clusters=5, n_temporal_clusters=5,
                  use_residual=True,
-                 # backward compat: old configs use 'use_cluster'
+                 use_memory_bank=False, n_prototypes=20,
                  use_cluster=False):
         super().__init__()
         self.num_nodes = num_nodes
@@ -83,8 +140,8 @@ class TrafficPredNet(nn.Module):
         self.use_flow_gate = use_flow_gate
         self.use_time_embed = use_time_embed
         self.use_residual = use_residual
+        self.use_memory_bank = use_memory_bank
 
-        # Handle old 'use_cluster' flag → both spatial+temporal
         if use_cluster and not use_spatial_cluster and not use_temporal_cluster:
             use_spatial_cluster = True
             use_temporal_cluster = True
@@ -111,6 +168,10 @@ class TrafficPredNet(nn.Module):
                     use_flow_gate=use_flow_gate, num_patterns=num_patterns)
             for _ in range(num_layers)
         ])
+
+        # Memory Bank (v7)
+        if use_memory_bank:
+            self.memory_bank = MemoryBank(n_prototypes, hidden_dim)
 
         self.output_proj = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -139,11 +200,16 @@ class TrafficPredNet(nn.Module):
         for i, block in enumerate(self.st_blocks):
             h = block(h, adjs[i], od_patterns=od_patterns)
 
-        h = h[:, -1, :, :]                     # (B, N, D) last step
+        h = h[:, -1, :, :]                     # (B, N, D)
+
+        # Memory Bank: query prototypes, enhance hidden state
+        if self.use_memory_bank:
+            h = self.memory_bank(h)             # (B, N, D)
+
         correction = self.output_proj(h)        # (B, N, C)
 
         if self.use_residual:
-            last_obs = x[:, -1, :, :]           # (B, N, C)
+            last_obs = x[:, -1, :, :]
             pred = last_obs + correction
         else:
             pred = correction
@@ -172,4 +238,6 @@ class TrafficPredNet(nn.Module):
             n_spatial_clusters=mcfg.get('n_spatial_clusters', 5),
             n_temporal_clusters=mcfg.get('n_temporal_clusters', 5),
             use_residual=mcfg.get('use_residual', True),
+            use_memory_bank=mcfg.get('use_memory_bank', False),
+            n_prototypes=mcfg.get('n_prototypes', 20),
         )
